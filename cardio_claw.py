@@ -11,7 +11,8 @@ from datetime import datetime, timedelta
 # =============================================================================
 # CARDIOLOGY CLAW V4.0 — Nuclear Cardiology Briefing for Blind MD User
 # Two-layer audio: Headline + Full Abstract per finding
-# Each finding is its own RSS episode (Siri "next episode" navigates findings)
+# Each finding is its own RSS episode (Siri "play next episode" navigates findings —
+# "next episode" alone can cue up the episode without starting playback)
 # =============================================================================
 
 try:
@@ -281,7 +282,7 @@ def generate_audio(findings, briefing_type, today_str, day_name):
         f"You have {total} finding{'s' if total != 1 else ''} today. "
         f"Nuclear cardiology findings appear first, followed by general cardiology. "
         f"Each finding is its own episode with a headline followed by the full abstract. "
-        f"Say next episode at any time to move to the next finding."
+        f"Say play next episode at any time to move to the next finding."
     )
     print(f"DEBUG: Generating intro...")
     intro_filename = f"episode_00_intro_{date_tag}.mp3"
@@ -299,7 +300,7 @@ def generate_audio(findings, briefing_type, today_str, day_name):
     # --- One episode per finding (headline + abstract, concatenated) ---
     for i, finding in enumerate(findings, 1):
         position = f"Finding {i} of {total}. "
-        pause_cue = " Abstract follows. Say next episode to skip." if i < total else " Abstract follows."
+        pause_cue = " Abstract follows. Say play next episode to skip." if i < total else " Abstract follows."
         headline_text = position + finding["headline"] + pause_cue
         abstract_text = "Full abstract. " + finding["abstract"]
 

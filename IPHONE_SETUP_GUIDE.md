@@ -80,11 +80,16 @@ Once set up, the listener uses only these voice commands:
 | What to say | What happens |
 |---|---|
 | "Hey Siri, play Cardiology Report" | Starts the intro episode |
-| "Hey Siri, next episode" | Skips to the next finding |
-| "Hey Siri, previous episode" | Goes back one episode |
+| "Hey Siri, play next episode" | Skips to the next finding **and starts playing it** |
+| "Hey Siri, play previous episode" | Goes back one episode and starts playing |
 | "Hey Siri, pause" | Pauses playback |
 | "Hey Siri, resume" | Resumes where she left off |
 | "Hey Siri, play Cardiology Report in Overcast" | Opens in Overcast specifically |
+
+Say **"play"** before "next episode" / "previous episode" — without it, Siri
+may cue up the episode without actually starting playback, which means
+tapping Play manually. That defeats voice-only use, so the audio itself now
+coaches this exact phrasing.
 
 The intro episode announces how many findings there are that week.
 Each finding announces its position ("Finding 3 of 8") so the
