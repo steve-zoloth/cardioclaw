@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 # =============================================================================
 # CARDIOLOGY CLAW V4.0 — Nuclear Cardiology Briefing for Blind MD User
 # Two-layer audio: Headline + Full Abstract per finding
-# Two-layer audio: headline + abstract per finding, single episode
+# Each finding is its own RSS episode (Siri "next episode" navigates findings)
 # =============================================================================
 
 try:
@@ -228,92 +228,30 @@ def generate_tts(client, text, filepath):
     return os.path.getsize(filepath)
 
 
-def get_mp3_duration_ms(filepath):
-    """Get MP3 duration in milliseconds using ffmpeg."""
+def concat_mp3s(segment_files, output_path):
+    """Concatenate MP3 segments into one file (no re-encoding, no chapters —
+    each output file here becomes its own separate RSS episode)."""
+    concat_file = output_path + ".concat.txt"
     try:
-        result = subprocess.run(
-            [FFMPEG_PATH, "-i", filepath],
-            capture_output=True, text=True
-        )
-        output = result.stderr
-        for line in output.split("\n"):
-            if "Duration:" in line:
-                time_str = line.strip().split("Duration:")[1].split(",")[0].strip()
-                h, m, s = time_str.split(":")
-                ms = int(float(h) * 3600000 + float(m) * 60000 + float(s) * 1000)
-                return ms
-    except Exception as e:
-        print(f"  Duration check failed: {e}")
-    return 0
-
-
-def combine_mp3s_with_chapters(segment_files, chapter_names, output_path):
-    """Combine multiple MP3 files into one with chapter markers using ffmpeg."""
-    try:
-        # Build concat file
-        concat_file = output_path + ".concat.txt"
         with open(concat_file, "w") as f:
             for seg in segment_files:
                 f.write(f"file '{seg}'\n")
 
-        # First pass: concatenate all MP3s
-        temp_combined = output_path + ".temp.mp3"
         result = subprocess.run([
             FFMPEG_PATH, "-y", "-f", "concat", "-safe", "0",
-            "-i", concat_file,
-            "-c", "copy", temp_combined
+            "-i", concat_file, "-c", "copy", output_path
         ], capture_output=True, text=True)
 
         if result.returncode != 0:
-            print(f"  ffmpeg concat error: {result.stderr[-200:]}")
+            print(f"  ffmpeg concat error: {result.stderr[-300:]}")
             return False
-
-        # Calculate chapter start times
-        chapter_starts_ms = []
-        cumulative = 0
-        for seg in segment_files:
-            chapter_starts_ms.append(cumulative)
-            cumulative += get_mp3_duration_ms(seg)
-
-        # Build ffmetadata file with chapters
-        meta_file = output_path + ".meta.txt"
-        with open(meta_file, "w") as f:
-            f.write(";FFMETADATA1\n")
-            for i, (name, start_ms) in enumerate(zip(chapter_names, chapter_starts_ms)):
-                end_ms = chapter_starts_ms[i + 1] if i + 1 < len(chapter_starts_ms) else cumulative
-                f.write(f"\n[CHAPTER]\n")
-                f.write(f"TIMEBASE=1/1000\n")
-                f.write(f"START={start_ms}\n")
-                f.write(f"END={end_ms}\n")
-                f.write(f"title={name}\n")
-
-        # Second pass: add chapters to combined MP3
-        result = subprocess.run([
-            FFMPEG_PATH, "-y",
-            "-i", temp_combined,
-            "-i", meta_file,
-            "-map_metadata", "1",
-            "-codec", "copy",
-            output_path
-        ], capture_output=True, text=True)
-
-        if result.returncode != 0:
-            print(f"  ffmpeg chapter error: {result.stderr[-200:]}")
-            # Fall back to combined without chapters
-            os.rename(temp_combined, output_path)
-        else:
-            os.remove(temp_combined)
-
-        # Clean up temp files
-        for f in [concat_file, meta_file]:
-            if os.path.exists(f):
-                os.remove(f)
-
         return True
-
     except Exception as e:
-        print(f"  combine_mp3s error: {e}")
+        print(f"  concat_mp3s error: {e}")
         return False
+    finally:
+        if os.path.exists(concat_file):
+            os.remove(concat_file)
 
 
 def generate_audio(findings, briefing_type, today_str, day_name):
@@ -334,44 +272,36 @@ def generate_audio(findings, briefing_type, today_str, day_name):
 
     total = len(findings)
     briefing_label = "weekly" if briefing_type == "weekly" else "daily"
+    episode_meta = []
 
-    # Build intro text
+    # --- Introduction episode ---
     intro_text = (
         f"Good morning. Today is {day_name}, {today_str}. "
         f"This is your {briefing_label} nuclear cardiology briefing. "
         f"You have {total} finding{'s' if total != 1 else ''} today. "
         f"Nuclear cardiology findings appear first, followed by general cardiology. "
-        f"Each finding begins with a one-sentence headline, followed by the full abstract. "
-        f"Say next episode at any time to skip to the next finding."
+        f"Each finding is its own episode with a headline followed by the full abstract. "
+        f"Say next episode at any time to move to the next finding."
     )
-
-    outro_text = (
-        f"That concludes your {briefing_label} nuclear cardiology briefing "
-        f"for {day_name}, {today_str}. "
-        f"You heard {total} finding{'s' if total != 1 else ''} today. "
-        f"Have a good day."
-    )
-
-    # Generate all segment MP3s
-    segment_files = []
-    chapter_names = []
-    all_text_parts = [intro_text]
-
     print(f"DEBUG: Generating intro...")
-    intro_path = os.path.join(tmp_dir, "seg_00_intro.mp3")
-    generate_tts(client, intro_text, intro_path)
-    segment_files.append(intro_path)
-    chapter_names.append(f"Introduction — {today_str}")
+    intro_filename = f"episode_00_intro_{date_tag}.mp3"
+    intro_path = os.path.join(OUTPUT_DIR, intro_filename)
+    intro_size = generate_tts(client, intro_text, intro_path)
+    episode_meta.append({
+        "filename": intro_filename,
+        "title": f"Introduction — {today_str}",
+        "text": intro_text[:500],
+        "type": "intro",
+        "date": today_str,
+        "size": intro_size
+    })
 
+    # --- One episode per finding (headline + abstract, concatenated) ---
     for i, finding in enumerate(findings, 1):
         position = f"Finding {i} of {total}. "
         pause_cue = " Abstract follows. Say next episode to skip." if i < total else " Abstract follows."
-
         headline_text = position + finding["headline"] + pause_cue
         abstract_text = "Full abstract. " + finding["abstract"]
-
-        all_text_parts.append(headline_text)
-        all_text_parts.append(abstract_text)
 
         print(f"DEBUG: Generating finding {i} headline...")
         headline_path = os.path.join(tmp_dir, f"seg_{i:02d}_headline.mp3")
@@ -381,150 +311,52 @@ def generate_audio(findings, briefing_type, today_str, day_name):
         abstract_path = os.path.join(tmp_dir, f"seg_{i:02d}_abstract.mp3")
         generate_tts(client, abstract_text, abstract_path)
 
-        # Each finding = headline + abstract as one chapter block
-        segment_files.append(headline_path)
-        segment_files.append(abstract_path)
-        chapter_names.append(f"Finding {i} of {total}")
+        finding_filename = f"episode_{i:02d}_finding_{date_tag}.mp3"
+        finding_path = os.path.join(OUTPUT_DIR, finding_filename)
+        print(f"DEBUG: Combining finding {i} into its own episode...")
+        ok = concat_mp3s([headline_path, abstract_path], finding_path)
+        if not ok:
+            # Fall back to headline-only audio rather than failing the whole run
+            os.rename(headline_path, finding_path)
+        finding_size = os.path.getsize(finding_path)
 
-        # But we want headline and abstract in the same chapter
-        # So we only add chapter marker at headline, not abstract
-        # Remove the abstract from chapter_names (it inherits the finding chapter)
+        episode_meta.append({
+            "filename": finding_filename,
+            "title": f"Finding {i} of {total}: {finding['headline'][:80]}",
+            "text": (finding["headline"] + " " + finding["abstract"])[:500],
+            "type": "finding",
+            "date": today_str,
+            "size": finding_size
+        })
 
-    all_text_parts.append(outro_text)
+    # --- Conclusion episode ---
+    outro_text = (
+        f"That concludes your {briefing_label} nuclear cardiology briefing "
+        f"for {day_name}, {today_str}. "
+        f"You heard {total} finding{'s' if total != 1 else ''} today. "
+        f"Have a good day."
+    )
     print(f"DEBUG: Generating outro...")
-    outro_path = os.path.join(tmp_dir, f"seg_{total+1:02d}_outro.mp3")
-    generate_tts(client, outro_text, outro_path)
-    segment_files.append(outro_path)
-    chapter_names.append("Conclusion")
-
-    # Rebuild chapter structure: one chapter per finding block (headline+abstract together)
-    # We need to recalculate chapters properly
-    # intro=1 segment, each finding=2 segments, outro=1 segment
-    # Chapter 0: intro (seg 0)
-    # Chapter 1: finding 1 (segs 1,2)
-    # Chapter 2: finding 2 (segs 3,4)
-    # etc.
-
-    proper_chapter_files = []
-    proper_chapter_names = []
-
-    proper_chapter_files.append(segment_files[0])  # intro
-    proper_chapter_names.append(f"Introduction — {today_str}")
-
-    for i in range(total):
-        headline_seg = segment_files[1 + i * 2]
-        abstract_seg = segment_files[2 + i * 2]
-        proper_chapter_files.append(headline_seg)
-        proper_chapter_files.append(abstract_seg)
-        proper_chapter_names.append(f"Finding {i+1} of {total}")
-        proper_chapter_names.append(None)  # abstract inherits same chapter
-
-    proper_chapter_files.append(segment_files[-1])  # outro
-    proper_chapter_names.append("Conclusion")
-
-    # Filter out None chapter names for ffmpeg (only mark chapter starts)
-    chapter_segment_files = []
-    chapter_name_list = []
-    for seg, name in zip(proper_chapter_files, proper_chapter_names):
-        chapter_segment_files.append(seg)
-        if name is not None:
-            chapter_name_list.append((len(chapter_segment_files) - 1, name))
-
-    # Simpler approach: combine all segments, mark chapters at intro, each finding headline, outro
-    output_filename = f"episode_00_briefing_{date_tag}.mp3"
-    output_path = os.path.join(OUTPUT_DIR, output_filename)
-
-    print(f"DEBUG: Combining {len(segment_files)} segments with chapter markers...")
-
-    # Build concat list and track chapter positions
-    concat_file = os.path.join(tmp_dir, "concat.txt")
-    with open(concat_file, "w") as f:
-        for seg in segment_files:
-            f.write(f"file '{seg}'\n")
-
-    # Concatenate
-    temp_combined = os.path.join(tmp_dir, "combined.mp3")
-    result = subprocess.run([
-        FFMPEG_PATH, "-y", "-f", "concat", "-safe", "0",
-        "-i", concat_file, "-c", "copy", temp_combined
-    ], capture_output=True, text=True)
-
-    if result.returncode != 0:
-        print(f"  ffmpeg concat failed: {result.stderr[-300:]}")
-        # Fall back to single episode without chapters
-        os.rename(temp_combined if os.path.exists(temp_combined) else segment_files[0], output_path)
-    else:
-        # Calculate chapter start times (chapters at: intro, each finding headline, outro)
-        durations = [get_mp3_duration_ms(seg) for seg in segment_files]
-        cumulative = 0
-        chapter_entries = []
-
-        # intro is segment 0
-        chapter_entries.append((cumulative, f"Introduction — {today_str}"))
-        cumulative += durations[0]
-
-        # each finding: headline at seg 1+i*2, abstract at seg 2+i*2
-        for i in range(total):
-            chapter_entries.append((cumulative, f"Finding {i+1} of {total}"))
-            cumulative += durations[1 + i * 2]   # headline
-            cumulative += durations[2 + i * 2]   # abstract
-
-        # outro
-        chapter_entries.append((cumulative, "Conclusion"))
-        cumulative += durations[-1]
-
-        total_duration_ms = cumulative
-
-        # Write ffmetadata
-        meta_file = os.path.join(tmp_dir, "chapters.meta")
-        with open(meta_file, "w") as f:
-            f.write(";FFMETADATA1\n")
-            for idx, (start_ms, title) in enumerate(chapter_entries):
-                end_ms = chapter_entries[idx + 1][0] if idx + 1 < len(chapter_entries) else total_duration_ms
-                f.write(f"\n[CHAPTER]\n")
-                f.write(f"TIMEBASE=1/1000\n")
-                f.write(f"START={start_ms}\n")
-                f.write(f"END={end_ms}\n")
-                f.write(f"title={title}\n")
-
-        # Apply chapters
-        result2 = subprocess.run([
-            FFMPEG_PATH, "-y",
-            "-i", temp_combined,
-            "-i", meta_file,
-            "-map_metadata", "1",
-            "-codec", "copy",
-            output_path
-        ], capture_output=True, text=True)
-
-        if result2.returncode != 0:
-            print(f"  Chapter embedding failed, using unchaptered version")
-            os.rename(temp_combined, output_path)
-        else:
-            os.remove(temp_combined)
-            print(f"  Chapter markers embedded successfully.")
-
-    size = os.path.getsize(output_path)
-    print(f"  Saved: {output_filename} ({size // 1024} KB)")
+    outro_filename = f"episode_{total+1:02d}_outro_{date_tag}.mp3"
+    outro_path = os.path.join(OUTPUT_DIR, outro_filename)
+    outro_size = generate_tts(client, outro_text, outro_path)
+    episode_meta.append({
+        "filename": outro_filename,
+        "title": f"Conclusion — {today_str}",
+        "text": outro_text[:500],
+        "type": "outro",
+        "date": today_str,
+        "size": outro_size
+    })
 
     # Clean up tmp segments
     import shutil
     shutil.rmtree(tmp_dir, ignore_errors=True)
 
-    full_text = " ".join(all_text_parts)
-    episode_meta = [{
-        "filename": output_filename,
-        "title": f"Cardiology Briefing — {today_str}",
-        "text": full_text[:500],
-        "type": "briefing",
-        "date": today_str,
-        "size": size
-    }]
-
     with open(EPISODES_FILE, "w") as f:
         json.dump(episode_meta, f, indent=2)
 
-    print(f"\nSuccess: Briefing with {total} findings and chapter markers generated.")
+    print(f"\nSuccess: {len(episode_meta)} episodes generated (intro + {total} findings + outro).")
     return episode_meta
 
 
@@ -621,7 +453,7 @@ def main():
     day_name = today.strftime("%A")
 
     print("=" * 60)
-    print(f"  CARDIOLOGY CLAW V4.0 — OpenAI TTS + Chapter Markers")
+    print(f"  CARDIOLOGY CLAW V4.0 — OpenAI TTS — Per-Finding Episodes")
     print(f"  {today.strftime('%A, %B %d %Y at %I:%M %p')}")
     print("=" * 60)
 
