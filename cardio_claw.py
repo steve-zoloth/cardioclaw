@@ -81,12 +81,6 @@ GENERAL_FEEDS = {
     "AHA Circulation":             "https://www.ahajournals.org/action/showFeed?type=etoc&feed=rss&jc=circ",
 }
 
-DAILY_FEEDS = {
-    "Journal of Nuclear Medicine": "https://jnm.snmjournals.org/rss/ahead.xml",
-    "BMJ Heart":                   "https://heart.bmj.com/rss/current.xml",
-    "AHA Circulation":             "https://www.ahajournals.org/action/showFeed?type=etoc&feed=rss&jc=circ",
-}
-
 
 def fetch_rss_content(feeds, label, max_items_per_feed=MAX_RSS_ITEMS):
     print(f"DEBUG: Fetching {len(feeds)} {label} feed(s)...")
@@ -135,35 +129,32 @@ def fetch_pubmed_abstracts(ids):
     return raw_text
 
 
-def summarize_with_claude(content, briefing_type, timeframe, total_sources):
+def summarize_with_claude(content, total_sources):
     print(f"DEBUG: Sending to {CLAUDE_MODEL}...")
     client = Anthropic(api_key=ANTHROPIC_API_KEY)
 
     today_str = datetime.now().strftime("%B %d, %Y")
     day_name = datetime.now().strftime("%A")
 
-    if briefing_type == "weekly":
-        scope = "the past 7 days"
-        briefing_label = "weekly"
-    else:
-        scope = timeframe
-        briefing_label = "daily"
-
     prompt = (
-        f"Nuclear cardiology {briefing_label} briefing for a blind physician. "
-        f"Today is {day_name}, {today_str}. Content covers {scope}.\n\n"
-        f"Return EXACTLY {MAX_FINDINGS} findings. Use ONLY this format, nothing else:\n"
+        f"Nuclear cardiology weekly briefing for a blind physician. "
+        f"Today is {day_name}, {today_str}. Content covers the past 7 days.\n\n"
+        f"Return UP TO {MAX_FINDINGS} findings — quality over quantity. Only include "
+        f"findings with genuine, substantive content from the source material below. "
+        f"Do not pad with vague, low-detail, or filler items just to hit a number; "
+        f"scientific output is uneven week to week, so a quiet week with 3 solid "
+        f"findings beats a full {MAX_FINDINGS} with weak ones. Number findings "
+        f"consecutively starting at 1 with no gaps. Use ONLY this format, nothing else:\n"
         f"FINDING_1_HEADLINE|one sentence max 30 words naming source and key result\n"
         f"FINDING_1_ABSTRACT|120-150 word spoken prose. Background, methods, results, conclusion. Plain text only.\n"
         f"FINDING_2_HEADLINE|one sentence\n"
         f"FINDING_2_ABSTRACT|120-150 words\n"
-        f"...through FINDING_{MAX_FINDINGS}\n\n"
+        f"...through however many findings are genuinely warranted (max {MAX_FINDINGS})\n\n"
         f"RULES:\n"
         f"- Plain text only, no markdown, no symbols\n"
-        f"- FINDING_1 through FINDING_5 MUST be nuclear cardiology (PET, SPECT, myocardial perfusion, cardiac amyloid, cardiac sarcoidosis, nuclear tracers, radiotracers)\n"
-        f"- General cardiology, AI/ECG studies, and non-imaging research go LAST (FINDING_6 through FINDING_8 only)\n"
-        f"- Use Google News ONLY for ASNC or SNMMI society announcements not in PubMed\n"
-        f"- Return ALL {MAX_FINDINGS} findings, do not stop early\n\n"
+        f"- Nuclear cardiology findings (PET, SPECT, myocardial perfusion, cardiac amyloid, cardiac sarcoidosis, nuclear tracers, radiotracers) come first, in as many as are genuinely substantive this week — could be fewer than 5, could be zero on a quiet week. Do not invent or pad a nuclear finding just to fill a quota.\n"
+        f"- General cardiology, AI/ECG studies, and non-imaging research come after all nuclear cardiology findings\n"
+        f"- Prefer PubMed content; use Google News only for ASNC or SNMMI society announcements not already covered in PubMed\n\n"
         f"Content:\n\n{content}"
     )
 
@@ -255,7 +246,7 @@ def concat_mp3s(segment_files, output_path):
             os.remove(concat_file)
 
 
-def generate_audio(findings, briefing_type, today_str, day_name):
+def generate_audio(findings, today_str, day_name):
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     client = OpenAI(api_key=OPENAI_API_KEY)
     date_tag = datetime.now().strftime("%Y%m%d")
@@ -272,14 +263,13 @@ def generate_audio(findings, briefing_type, today_str, day_name):
         os.remove(EPISODES_FILE)
 
     total = len(findings)
-    briefing_label = "weekly" if briefing_type == "weekly" else "daily"
     episode_meta = []
 
     # --- Introduction episode ---
     intro_text = (
         f"Good morning. Today is {day_name}, {today_str}. "
-        f"This is your {briefing_label} nuclear cardiology briefing. "
-        f"You have {total} finding{'s' if total != 1 else ''} today. "
+        f"This is your weekly nuclear cardiology briefing. "
+        f"You have {total} finding{'s' if total != 1 else ''} this week. "
         f"Nuclear cardiology findings appear first, followed by general cardiology. "
         f"Each finding is its own episode with a headline followed by the full abstract. "
         f"Say play next episode at any time to move to the next finding."
@@ -332,7 +322,7 @@ def generate_audio(findings, briefing_type, today_str, day_name):
 
     # --- Conclusion episode ---
     outro_text = (
-        f"That concludes your {briefing_label} nuclear cardiology briefing "
+        f"That concludes your weekly nuclear cardiology briefing "
         f"for {day_name}, {today_str}. "
         f"You heard {total} finding{'s' if total != 1 else ''} today. "
         f"Have a good day."
@@ -448,14 +438,12 @@ def restore_backup_episodes():
 
 def main():
     today = datetime.now()
-    is_monday = today.weekday() == 0
-    briefing_type = "weekly" if is_monday else "daily"
     today_str = today.strftime("%B %d, %Y")
     day_name = today.strftime("%A")
 
     print("=" * 60)
     print(f"  CARDIOLOGY CLAW V4.0 — OpenAI TTS — Per-Finding Episodes")
-    print(f"  {today.strftime('%A, %B %d %Y at %I:%M %p')}")
+    print(f"  Weekly run — {today.strftime('%A, %B %d %Y at %I:%M %p')}")
     print("=" * 60)
 
     if not ANTHROPIC_API_KEY or not OPENAI_API_KEY:
@@ -464,21 +452,10 @@ def main():
             f"Cardio Claw failed on {day_name}, {today_str}. API keys not set.")
         return
 
-    yesterday_str = (today - timedelta(days=1)).strftime("%Y/%m/%d")
     today_date_str = today.strftime("%Y/%m/%d")
-    thirty_days_str = (today - timedelta(days=30)).strftime("%Y/%m/%d")
-    seven_days_str = (today - timedelta(days=7)).strftime("%Y/%m/%d")
-
-    if is_monday:
-        from_date = seven_days_str
-        to_date = today_date_str
-        timeframe = "the past 7 days"
-        journal_feeds = GENERAL_FEEDS
-    else:
-        from_date = yesterday_str
-        to_date = today_date_str
-        timeframe = "yesterday"
-        journal_feeds = DAILY_FEEDS
+    from_date = (today - timedelta(days=7)).strftime("%Y/%m/%d")
+    to_date = today_date_str
+    journal_feeds = GENERAL_FEEDS
 
     try:
         google_content = fetch_rss_content(GOOGLE_NEWS_FEEDS, "Google News")
@@ -489,13 +466,6 @@ def main():
 
         print("Searching PubMed — general cardiology high impact...")
         general_ids = search_pubmed(GENERAL_CARDIOLOGY_TERMS, from_date, to_date, MAX_GENERAL_ARTICLES)
-
-        if not is_monday and not nuclear_ids and not general_ids:
-            print("Nothing from yesterday. Falling back to 30 days...")
-            from_date = thirty_days_str
-            timeframe = "the past 30 days"
-            nuclear_ids = search_pubmed(NUCLEAR_CARDIOLOGY_TERMS, from_date, today_date_str, MAX_NUCLEAR_ARTICLES)
-            general_ids = search_pubmed(GENERAL_CARDIOLOGY_TERMS, from_date, today_date_str, MAX_GENERAL_ARTICLES)
 
         nuclear_content = fetch_pubmed_abstracts(nuclear_ids)
         general_content = fetch_pubmed_abstracts(general_ids)
@@ -528,13 +498,13 @@ def main():
         if not combined.strip():
             msg = (
                 f"Good morning. Today is {day_name}, {today_str}. "
-                f"This is your {briefing_type} nuclear cardiology briefing. "
-                f"There are no new findings available today. Please check back tomorrow."
+                f"This is your weekly nuclear cardiology briefing. "
+                f"There are no new findings available this week. Please check back next week."
             )
             generate_error_episode(msg, today_str)
             return
 
-        raw = summarize_with_claude(combined, briefing_type, timeframe, source_count)
+        raw = summarize_with_claude(combined, source_count)
         findings = parse_findings(raw)
 
         if not findings:
@@ -547,7 +517,7 @@ def main():
             generate_error_episode(msg, today_str)
             return
 
-        episode_meta = generate_audio(findings, briefing_type, today_str, day_name)
+        episode_meta = generate_audio(findings, today_str, day_name)
 
         send_alert_email(
             f"OK — {len(findings)} findings — {today_str}",
