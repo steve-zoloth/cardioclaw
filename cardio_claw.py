@@ -3,6 +3,7 @@ import re
 import json
 import subprocess
 import feedparser
+import xml.etree.ElementTree as ET
 from openai import OpenAI
 from Bio import Entrez
 from anthropic import Anthropic
@@ -40,6 +41,12 @@ EPISODES_FILE = os.path.join(OUTPUT_DIR, "episodes.json")
 SEASON_FILE = os.path.join(OUTPUT_DIR, "season_counter.txt")
 BACKUP_DIR = os.path.expanduser("~/CardioClaw/output_prev")
 FFMPEG_PATH = "/usr/local/bin/ffmpeg"
+
+# Full-paper feature (branch: full-text-feature) — off by default. Even if this
+# code is ever merged/deployed accidentally, nothing changes unless explicitly
+# enabled here.
+ENABLE_FULL_TEXT_EPISODES = False
+HEADER_SILENCE_SECONDS = 2
 
 # Each Monday's run is one "season" (Season 1 = first week, Season 2 = second, ...).
 # The feed is cumulative (weeks are appended, not replaced) so it matches what
@@ -146,6 +153,64 @@ def fetch_pubmed_abstracts(ids):
     return raw_text
 
 
+# --- Full-paper feature (PMC full text) ---
+# get_pmc_id()/fetch_full_text() ported from voice_pubmed_bot.py, where this
+# exact logic was already built and verified against the live API (paywalled
+# article correctly returns None; open-access article extracted cleanly).
+
+def get_pmc_id(pmid):
+    """Check whether a PubMed article has a full-text copy in PMC (open access
+    or NIH-funded). Returns None if not — most paywalled journal content
+    (JACC, JAMA, Eur Heart J, etc.) will not have one."""
+    try:
+        with Entrez.elink(dbfrom="pubmed", db="pmc", id=pmid, linkname="pubmed_pmc") as handle:
+            record = Entrez.read(handle)
+        linksets = record[0].get("LinkSetDb", [])
+        if not linksets:
+            return None
+        links = linksets[0].get("Link", [])
+        return links[0]["Id"] if links else None
+    except Exception:
+        return None
+
+
+def fetch_full_text(pmid):
+    """Fetch full paper body text from PMC if available. Returns None if this
+    article has no PMC copy."""
+    pmcid = get_pmc_id(pmid)
+    if not pmcid:
+        return None
+    try:
+        with Entrez.efetch(db="pmc", id=pmcid, rettype="full", retmode="xml") as handle:
+            xml_data = handle.read()
+        root = ET.fromstring(xml_data)
+        body = root.find(".//body")
+        if body is None:
+            return None
+        paragraphs = ["".join(p.itertext()).strip() for p in body.iter("p")]
+        full_text = "\n\n".join(p for p in paragraphs if p)
+        return full_text if full_text.strip() else None
+    except Exception as e:
+        print(f"  fetch_full_text error for PMID {pmid}: {e}")
+        return None
+
+
+def generate_silence(duration_seconds, output_path):
+    """Generate a silent MP3 of the given duration using ffmpeg, so header
+    announcements have a clear, unambiguous gap before content starts."""
+    result = subprocess.run([
+        FFMPEG_PATH, "-y", "-f", "lavfi",
+        "-i", f"anullsrc=r=44100:cl=mono",
+        "-t", str(duration_seconds),
+        "-q:a", "9",
+        output_path
+    ], capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"  generate_silence error: {result.stderr[-300:]}")
+        return False
+    return True
+
+
 def summarize_with_claude(content, total_sources):
     print(f"DEBUG: Sending to {CLAUDE_MODEL}...")
     client = Anthropic(api_key=ANTHROPIC_API_KEY)
@@ -164,11 +229,14 @@ def summarize_with_claude(content, total_sources):
         f"consecutively starting at 1 with no gaps. Use ONLY this format, nothing else:\n"
         f"FINDING_1_HEADLINE|one sentence max 30 words naming source and key result\n"
         f"FINDING_1_ABSTRACT|120-150 word spoken prose. Background, methods, results, conclusion. Plain text only.\n"
+        f"FINDING_1_PMID|the PMID number from the source material this finding is based on, or NONE if it came from a Google News item with no PMID\n"
         f"FINDING_2_HEADLINE|one sentence\n"
         f"FINDING_2_ABSTRACT|120-150 words\n"
+        f"FINDING_2_PMID|PMID or NONE\n"
         f"...through however many findings are genuinely warranted (max {MAX_FINDINGS})\n\n"
         f"RULES:\n"
         f"- Plain text only, no markdown, no symbols\n"
+        f"- Each PubMed source article in the content below has its own explicit 'PMID: <number>' line — copy that exact number for FINDING_N_PMID. Never guess or invent a PMID; use NONE if you're not certain.\n"
         f"- Nuclear cardiology findings (PET, SPECT, myocardial perfusion, cardiac amyloid, cardiac sarcoidosis, nuclear tracers, radiotracers) come first, in as many as are genuinely substantive this week — could be fewer than 5, could be zero on a quiet week. Do not invent or pad a nuclear finding just to fill a quota.\n"
         f"- General cardiology, AI/ECG studies, and non-imaging research come after all nuclear cardiology findings\n"
         f"- Prefer PubMed content; use Google News only for ASNC or SNMMI society announcements not already covered in PubMed\n\n"
@@ -189,6 +257,7 @@ def parse_findings(raw_text):
     findings = []
     headlines = {}
     abstracts = {}
+    pmids = {}
 
     lines = raw_text.strip().split("\n")
     for line in lines:
@@ -209,8 +278,16 @@ def parse_findings(raw_text):
                 abstracts[num] = text.strip()
             except Exception as e:
                 print(f"  Abstract parse error: {line[:50]} — {e}")
+        elif "_PMID|" in line:
+            try:
+                tag, text = line.split("|", 1)
+                num = tag.replace("FINDING_", "").replace("_PMID", "")
+                text = text.strip()
+                pmids[num] = text if text.isdigit() else None
+            except Exception as e:
+                print(f"  PMID parse error: {line[:50]} — {e}")
 
-    # Pair headlines and abstracts
+    # Pair headlines, abstracts, and PMIDs
     for num in sorted(headlines.keys(), key=lambda x: int(x)):
         headline = headlines.get(num, "")
         abstract = abstracts.get(num, "")
@@ -218,15 +295,20 @@ def parse_findings(raw_text):
             findings.append({
                 "headline": headline,
                 "abstract": abstract,
-                "source": "Cardiology Journal"
+                "source": "Cardiology Journal",
+                "pmid": pmids.get(num)
             })
 
-    print(f"DEBUG: Parsed {len(findings)} finding(s).")
+    print(f"DEBUG: Parsed {len(findings)} finding(s), "
+          f"{sum(1 for f in findings if f['pmid'])} with a PMID.")
     return findings
 
 
 def generate_tts(client, text, filepath):
-    """Generate a single TTS MP3 file."""
+    """Generate a single TTS MP3 file. OpenAI's TTS API caps input at 2000
+    tokens per request (confirmed empirically, not documented as a hard
+    character count) — this is for short text (headlines/abstracts) that
+    stay well under that; use generate_tts_chunked() for long text."""
     response = client.audio.speech.create(
         model=OPENAI_TTS_MODEL,
         voice=OPENAI_VOICE,
@@ -235,6 +317,54 @@ def generate_tts(client, text, filepath):
     )
     response.stream_to_file(filepath)
     return os.path.getsize(filepath)
+
+
+def generate_tts_chunked(client, text, filepath, tmp_dir, prefix):
+    """Generate TTS for arbitrarily long text by splitting into chunks that
+    stay safely under the 2000-token API limit, generating each separately,
+    then concatenating. Splits on paragraph boundaries first, falling back to
+    sentence boundaries for any single paragraph that's still too long."""
+    CHUNK_CHAR_LIMIT = 3000  # conservative vs. the ~2000-token cap
+
+    paragraphs = text.split("\n\n")
+    chunks = []
+    current = ""
+    for para in paragraphs:
+        candidate = (current + "\n\n" + para).strip() if current else para
+        if len(candidate) <= CHUNK_CHAR_LIMIT:
+            current = candidate
+        else:
+            if current:
+                chunks.append(current)
+            if len(para) <= CHUNK_CHAR_LIMIT:
+                current = para
+            else:
+                # Single paragraph too long on its own — split on sentences.
+                sentences = re.split(r"(?<=[.!?])\s+", para)
+                current = ""
+                for sent in sentences:
+                    cand = (current + " " + sent).strip() if current else sent
+                    if len(cand) <= CHUNK_CHAR_LIMIT:
+                        current = cand
+                    else:
+                        if current:
+                            chunks.append(current)
+                        current = sent
+    if current:
+        chunks.append(current)
+
+    print(f"  generate_tts_chunked: {len(text)} chars split into {len(chunks)} chunk(s).")
+    chunk_paths = []
+    for idx, chunk in enumerate(chunks):
+        chunk_path = os.path.join(tmp_dir, f"{prefix}_chunk_{idx:03d}.mp3")
+        generate_tts(client, chunk, chunk_path)
+        chunk_paths.append(chunk_path)
+
+    ok = concat_mp3s(chunk_paths, filepath)
+    for p in chunk_paths:
+        if os.path.exists(p):
+            os.remove(p)
+    return ok
 
 
 def concat_mp3s(segment_files, output_path):
@@ -304,11 +434,25 @@ def generate_audio(findings, today_str, day_name):
     })
 
     # --- One episode per finding (headline + abstract, concatenated) ---
+    full_text_available = {}  # finding index (1-based) -> pmid, for findings with PMC full text
     for i, finding in enumerate(findings, 1):
         position = f"Finding {i} of {total}. "
         pause_cue = " Abstract follows. Say play next episode to skip." if i < total else " Abstract follows."
         headline_text = position + finding["headline"] + pause_cue
         abstract_text = "Full abstract. " + finding["abstract"]
+        full_text_alert = ""
+
+        if ENABLE_FULL_TEXT_EPISODES:
+            pmc_id = get_pmc_id(finding["pmid"]) if finding.get("pmid") else None
+            if finding.get("pmid"):
+                print(f"DEBUG: Checked PMC full-text availability for finding {i} "
+                      f"(PMID {finding['pmid']}): {'available' if pmc_id else 'not available'}.")
+            if pmc_id:
+                full_text_available[i] = finding["pmid"]
+                full_text_alert = " Full paper available after today's findings conclude."
+            else:
+                full_text_alert = " Full paper not available for this finding."
+            abstract_text += full_text_alert
 
         print(f"DEBUG: Generating finding {i} headline...")
         headline_path = os.path.join(tmp_dir, f"seg_{i:02d}_headline.mp3")
@@ -330,7 +474,7 @@ def generate_audio(findings, today_str, day_name):
         episode_meta.append({
             "filename": finding_filename,
             "title": f"Finding {i} of {total}: {finding['headline'][:80]}",
-            "text": (finding["headline"] + " " + finding["abstract"])[:500],
+            "text": (finding["headline"] + " " + finding["abstract"] + full_text_alert)[:500],
             "type": "finding",
             "date": today_str,
             "size": finding_size,
@@ -361,6 +505,58 @@ def generate_audio(findings, today_str, day_name):
         "season_episode": total + 2,
         "generated_at": generated_at.isoformat()
     })
+
+    # --- Bonus full-paper episodes (opt-in, placed after Conclusion so the
+    # default briefing is untouched — reached only by deliberately continuing
+    # past the natural stopping point) ---
+    if ENABLE_FULL_TEXT_EPISODES and full_text_available:
+        next_season_episode = total + 3
+        for i in sorted(full_text_available.keys()):
+            finding = findings[i - 1]
+            pmid = full_text_available[i]
+            print(f"DEBUG: Fetching full text for finding {i} (PMID {pmid})...")
+            full_text = fetch_full_text(pmid)
+            if not full_text:
+                print(f"  Full text fetch failed at generation time for PMID {pmid}, skipping.")
+                continue
+
+            header_text = (
+                f"Full paper for finding {i} of {total}: {finding['headline']} "
+                f"Say play next episode to skip."
+            )
+            header_path = os.path.join(tmp_dir, f"fp_{i:02d}_header.mp3")
+            generate_tts(client, header_text, header_path)
+
+            silence_path = os.path.join(tmp_dir, f"fp_{i:02d}_silence.mp3")
+            generate_silence(HEADER_SILENCE_SECONDS, silence_path)
+
+            body_path = os.path.join(tmp_dir, f"fp_{i:02d}_body.mp3")
+            body_ok = generate_tts_chunked(client, full_text, body_path, tmp_dir, f"fp_{i:02d}")
+
+            fulltext_filename = f"episode_S{season:03d}_{next_season_episode:02d}_fulltext_{date_tag}.mp3"
+            fulltext_path = os.path.join(OUTPUT_DIR, fulltext_filename)
+            segments = [header_path, silence_path]
+            if body_ok:
+                segments.append(body_path)
+            print(f"DEBUG: Combining full paper for finding {i} into its own episode...")
+            ok = concat_mp3s(segments, fulltext_path)
+            if not ok:
+                print(f"  Full-text episode assembly failed for finding {i}, skipping.")
+                continue
+            fulltext_size = os.path.getsize(fulltext_path)
+
+            episode_meta.append({
+                "filename": fulltext_filename,
+                "title": f"Full Paper — Finding {i} of {total}: {finding['headline'][:70]}",
+                "text": full_text[:500],
+                "type": "fulltext",
+                "date": today_str,
+                "size": fulltext_size,
+                "season": season,
+                "season_episode": next_season_episode,
+                "generated_at": generated_at.isoformat()
+            })
+            next_season_episode += 1
 
     # Clean up tmp segments
     import shutil
