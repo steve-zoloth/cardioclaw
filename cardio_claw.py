@@ -118,12 +118,22 @@ def search_pubmed(search_term, from_date, to_date, max_results):
     return ids
 
 
+def strip_author_affiliations(raw_text):
+    """Remove PubMed's 'Author information:' block (names, departments, addresses,
+    emails) — clinically useless bulk that otherwise eats the truncation budget
+    before the actual abstract text does."""
+    return re.sub(r"Author information:\n.*?\n\n", "", raw_text, flags=re.DOTALL)
+
+
 def fetch_pubmed_abstracts(ids):
     if not ids:
         return ""
     print(f"DEBUG: Fetching {len(ids)} abstracts...")
     with Entrez.efetch(db="pubmed", id=ids, rettype="abstract", retmode="text") as handle:
         raw_text = handle.read()
+    before_len = len(raw_text)
+    raw_text = strip_author_affiliations(raw_text)
+    print(f"DEBUG: Stripped author affiliations ({before_len} -> {len(raw_text)} chars).")
     raw_text = raw_text[:MAX_ABSTRACT_CHARS]
     print(f"DEBUG: Received {len(raw_text)} characters.")
     return raw_text
