@@ -23,7 +23,7 @@ def load_episodes():
 @app.route("/")
 def index():
     episodes = load_episodes()
-    return "Cardiology Claw V3.0 — " + str(len(episodes)) + " episode(s) available."
+    return "Cardiology Claw V4.0 — " + str(len(episodes)) + " episode(s) available."
 
 
 @app.route("/cover.png")
@@ -52,21 +52,40 @@ def feed():
     build_date = now.strftime("%a, %d %b %Y %H:%M:%S +0000")
     date_str = now.strftime("%B %d %Y")
 
+    # Cumulative feed: order oldest season/episode first (matches itunes:type
+    # serial listening order). Episodes generated before this field existed
+    # fall back to sane defaults so the feed doesn't break on old data.
+    episodes = sorted(
+        episodes,
+        key=lambda e: (e.get("season", 0), e.get("season_episode", 0))
+    )
+
     items = ""
-    total_eps = len(episodes)
-    for i, ep in enumerate(episodes):
+    for ep in episodes:
         audio_url = "http://" + SERVER_IP + ":" + str(PORT) + "/audio/" + ep["filename"]
         guid = SERVER_IP + "-" + ep["filename"] + "-" + ep.get("date", date_str).replace(" ", "")
         description = ep["text"][:300].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        season = ep.get("season", 1)
+        season_episode = ep.get("season_episode", 1)
+
+        # pubDate is derived from the episode's own stored generation time (not
+        # "now") plus a small per-episode offset, so it's stable across repeated
+        # requests and stays correctly ordered both within and across seasons.
+        try:
+            base_time = datetime.fromisoformat(ep["generated_at"])
+        except (KeyError, ValueError):
+            base_time = now
+        pub_date = base_time + timedelta(seconds=season_episode)
 
         items += """
     <item>
       <title>""" + ep["title"] + """</title>
       <description>""" + description + """</description>
-      <pubDate>""" + (now + timedelta(minutes=(total_eps - i))).strftime("%a, %d %b %Y %H:%M:%S +0000") + """</pubDate>
+      <pubDate>""" + pub_date.strftime("%a, %d %b %Y %H:%M:%S +0000") + """</pubDate>
       <enclosure url=\"""" + audio_url + """\" length=\"""" + str(ep["size"]) + """\" type="audio/mpeg"/>
       <guid isPermaLink="false">""" + guid + """</guid>
-      <itunes:episode>""" + str(i + 1) + """</itunes:episode>
+      <itunes:season>""" + str(season) + """</itunes:season>
+      <itunes:episode>""" + str(season_episode) + """</itunes:episode>
     </item>"""
 
     rss = """<?xml version="1.0" encoding="UTF-8"?>

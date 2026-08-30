@@ -37,8 +37,15 @@ MAX_ABSTRACT_CHARS = 40000
 
 OUTPUT_DIR = os.path.expanduser("~/CardioClaw/output")
 EPISODES_FILE = os.path.join(OUTPUT_DIR, "episodes.json")
+SEASON_FILE = os.path.join(OUTPUT_DIR, "season_counter.txt")
 BACKUP_DIR = os.path.expanduser("~/CardioClaw/output_prev")
 FFMPEG_PATH = "/usr/local/bin/ffmpeg"
+
+# Each Monday's run is one "season" (Season 1 = first week, Season 2 = second, ...).
+# The feed is cumulative (weeks are appended, not replaced) so it matches what
+# podcast apps actually assume about feeds; RETENTION_WEEKS bounds how far back
+# that history goes before old seasons get pruned from both the feed and disk.
+RETENTION_WEEKS = 4
 
 CLAUDE_MODEL = "claude-sonnet-4-6"
 OPENAI_TTS_MODEL = "gpt-4o-mini-tts"
@@ -265,13 +272,9 @@ def generate_audio(findings, today_str, day_name):
 
     backup_current_episodes()
 
-    # Clear old episode files
-    for f in os.listdir(OUTPUT_DIR):
-        if f.startswith("episode_") and f.endswith(".mp3"):
-            os.remove(os.path.join(OUTPUT_DIR, f))
-    if os.path.exists(EPISODES_FILE):
-        os.remove(EPISODES_FILE)
-
+    season = get_next_season()
+    generated_at = datetime.now()
+    existing_episodes = load_episodes()
     total = len(findings)
     episode_meta = []
 
@@ -285,7 +288,7 @@ def generate_audio(findings, today_str, day_name):
         f"Say play next episode at any time to move to the next finding."
     )
     print(f"DEBUG: Generating intro...")
-    intro_filename = f"episode_00_intro_{date_tag}.mp3"
+    intro_filename = f"episode_S{season:03d}_00_intro_{date_tag}.mp3"
     intro_path = os.path.join(OUTPUT_DIR, intro_filename)
     intro_size = generate_tts(client, intro_text, intro_path)
     episode_meta.append({
@@ -294,7 +297,10 @@ def generate_audio(findings, today_str, day_name):
         "text": intro_text[:500],
         "type": "intro",
         "date": today_str,
-        "size": intro_size
+        "size": intro_size,
+        "season": season,
+        "season_episode": 1,
+        "generated_at": generated_at.isoformat()
     })
 
     # --- One episode per finding (headline + abstract, concatenated) ---
@@ -312,7 +318,7 @@ def generate_audio(findings, today_str, day_name):
         abstract_path = os.path.join(tmp_dir, f"seg_{i:02d}_abstract.mp3")
         generate_tts(client, abstract_text, abstract_path)
 
-        finding_filename = f"episode_{i:02d}_finding_{date_tag}.mp3"
+        finding_filename = f"episode_S{season:03d}_{i:02d}_finding_{date_tag}.mp3"
         finding_path = os.path.join(OUTPUT_DIR, finding_filename)
         print(f"DEBUG: Combining finding {i} into its own episode...")
         ok = concat_mp3s([headline_path, abstract_path], finding_path)
@@ -327,7 +333,10 @@ def generate_audio(findings, today_str, day_name):
             "text": (finding["headline"] + " " + finding["abstract"])[:500],
             "type": "finding",
             "date": today_str,
-            "size": finding_size
+            "size": finding_size,
+            "season": season,
+            "season_episode": i + 1,
+            "generated_at": generated_at.isoformat()
         })
 
     # --- Conclusion episode ---
@@ -338,7 +347,7 @@ def generate_audio(findings, today_str, day_name):
         f"Have a good day."
     )
     print(f"DEBUG: Generating outro...")
-    outro_filename = f"episode_{total+1:02d}_outro_{date_tag}.mp3"
+    outro_filename = f"episode_S{season:03d}_{total+1:02d}_outro_{date_tag}.mp3"
     outro_path = os.path.join(OUTPUT_DIR, outro_filename)
     outro_size = generate_tts(client, outro_text, outro_path)
     episode_meta.append({
@@ -347,24 +356,38 @@ def generate_audio(findings, today_str, day_name):
         "text": outro_text[:500],
         "type": "outro",
         "date": today_str,
-        "size": outro_size
+        "size": outro_size,
+        "season": season,
+        "season_episode": total + 2,
+        "generated_at": generated_at.isoformat()
     })
 
     # Clean up tmp segments
     import shutil
     shutil.rmtree(tmp_dir, ignore_errors=True)
 
-    with open(EPISODES_FILE, "w") as f:
-        json.dump(episode_meta, f, indent=2)
+    # Cumulative feed: keep prior seasons (pruning anything past the retention
+    # window) and append this week's new episodes rather than replacing history.
+    kept_existing = prune_old_seasons(existing_episodes, season)
+    all_episodes = kept_existing + episode_meta
 
-    print(f"\nSuccess: {len(episode_meta)} episodes generated (intro + {total} findings + outro).")
+    with open(EPISODES_FILE, "w") as f:
+        json.dump(all_episodes, f, indent=2)
+
+    save_next_season(season)
+
+    print(f"\nSuccess: {len(episode_meta)} new episodes generated (intro + {total} findings + outro) "
+          f"as Season {season}. Feed now holds {len(all_episodes)} episode(s) across "
+          f"{len(set(e.get('season', season) for e in all_episodes))} season(s).")
     return episode_meta
 
 
 def generate_error_episode(message, today_str):
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     client = OpenAI(api_key=OPENAI_API_KEY)
-    filename = "episode_00_error.mp3"
+    date_tag = datetime.now().strftime("%Y%m%d")
+    season = get_next_season()
+    filename = f"episode_S{season:03d}_00_error_{date_tag}.mp3"
     filepath = os.path.join(OUTPUT_DIR, filename)
     try:
         response = client.audio.speech.create(
@@ -375,16 +398,23 @@ def generate_error_episode(message, today_str):
         )
         response.stream_to_file(filepath)
         size = os.path.getsize(filepath)
-        episodes = [{
+        new_entry = {
             "filename": filename,
             "title": f"System Message — {today_str}",
             "text": message,
             "type": "error",
             "date": today_str,
-            "size": size
-        }]
+            "size": size,
+            "season": season,
+            "season_episode": 1,
+            "generated_at": datetime.now().isoformat()
+        }
+        # Append rather than replace, so a failed run doesn't wipe out
+        # previously accumulated weeks of history.
+        existing = prune_old_seasons(load_episodes(), season)
         with open(EPISODES_FILE, "w") as f:
-            json.dump(episodes, f, indent=2)
+            json.dump(existing + [new_entry], f, indent=2)
+        save_next_season(season)
     except Exception as e:
         print(f"Error episode generation failed: {e}")
 
@@ -406,6 +436,56 @@ def send_alert_email(subject, body):
         print(f"Alert email sent: {subject}")
     except Exception as e:
         print(f"Alert email failed (non-fatal): {e}")
+
+
+def load_episodes():
+    """Load the current cumulative episode list. Returns [] if none exists yet."""
+    if not os.path.exists(EPISODES_FILE):
+        return []
+    try:
+        with open(EPISODES_FILE, "r") as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"DEBUG: Failed to load existing episodes.json ({e}); starting fresh.")
+        return []
+
+
+def get_next_season():
+    """Read the next season number from SEASON_FILE, defaulting to 1 if absent."""
+    if not os.path.exists(SEASON_FILE):
+        return 1
+    try:
+        with open(SEASON_FILE, "r") as f:
+            return int(f.read().strip())
+    except Exception:
+        return 1
+
+
+def save_next_season(season_used):
+    """Persist the season number to use on the *next* run (only called after a
+    successful generate)."""
+    with open(SEASON_FILE, "w") as f:
+        f.write(str(season_used + 1))
+
+
+def prune_old_seasons(episodes, current_season):
+    """Drop episodes (and their mp3 files) from seasons older than RETENTION_WEEKS
+    back from current_season. Returns the pruned list."""
+    cutoff = current_season - RETENTION_WEEKS
+    kept, dropped = [], []
+    for ep in episodes:
+        if ep.get("season", current_season) <= cutoff:
+            dropped.append(ep)
+        else:
+            kept.append(ep)
+    for ep in dropped:
+        path = os.path.join(OUTPUT_DIR, ep["filename"])
+        if os.path.exists(path):
+            os.remove(path)
+    if dropped:
+        print(f"DEBUG: Pruned {len(dropped)} episode(s) from season(s) <= {cutoff} "
+              f"(older than {RETENTION_WEEKS} weeks).")
+    return kept
 
 
 def backup_current_episodes():
