@@ -33,7 +33,7 @@ MAX_NUCLEAR_ARTICLES = 8
 MAX_GENERAL_ARTICLES = 6
 MAX_RSS_ITEMS = 2
 MAX_FINDINGS = 8
-MAX_ABSTRACT_CHARS = 12000
+MAX_ABSTRACT_CHARS = 40000
 
 OUTPUT_DIR = os.path.expanduser("~/CardioClaw/output")
 EPISODES_FILE = os.path.join(OUTPUT_DIR, "episodes.json")
@@ -493,7 +493,7 @@ def main():
             )
             source_count += 1
 
-        combined = combined[:25000]
+        combined = combined[:90000]
 
         if not combined.strip():
             msg = (
