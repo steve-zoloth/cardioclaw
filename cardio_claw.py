@@ -474,7 +474,10 @@ def generate_audio(findings, today_str, day_name):
         episode_meta.append({
             "filename": finding_filename,
             "title": f"Finding {i} of {total}: {finding['headline'][:80]}",
-            "text": (finding["headline"] + " " + finding["abstract"] + full_text_alert)[:500],
+            "text": (
+                (finding["headline"] + " " + finding["abstract"])[:500 - len(full_text_alert)]
+                + full_text_alert
+            ),
             "type": "finding",
             "date": today_str,
             "size": finding_size,
