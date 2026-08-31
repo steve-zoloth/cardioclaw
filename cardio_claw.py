@@ -157,6 +157,17 @@ def fetch_pubmed_abstracts(ids):
 # get_pmc_id()/fetch_full_text() ported from voice_pubmed_bot.py, where this
 # exact logic was already built and verified against the live API (paywalled
 # article correctly returns None; open-access article extracted cleanly).
+#
+# KNOWN LIMITATION (found during live testing, Aug 30 2026): "open access" and
+# "in PMC" are not the same thing. Confirmed case: PMID 41469289 (an IAEA
+# working group paper, freely readable on ScienceDirect) has zero PMC presence
+# despite being genuinely open access - PMC deposition only happens for
+# NIH-funded work or via specific publisher-PMC agreements, not all OA content.
+# This function is PMC-only by design, so it will correctly report "not
+# available" for real open-access papers like this one that simply never made
+# it into PMC. Broader coverage would need a different mechanism entirely -
+# e.g. Unpaywall's API (resolves OA copies by DOI across many more sources
+# than just PMC) - not something currently built here.
 
 def get_pmc_id(pmid):
     """Check whether a PubMed article has a full-text copy in PMC (open access
