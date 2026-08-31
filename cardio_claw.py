@@ -42,10 +42,13 @@ SEASON_FILE = os.path.join(OUTPUT_DIR, "season_counter.txt")
 BACKUP_DIR = os.path.expanduser("~/CardioClaw/output_prev")
 FFMPEG_PATH = "/usr/local/bin/ffmpeg"
 
-# Full-paper feature (branch: full-text-feature) — off by default. Even if this
-# code is ever merged/deployed accidentally, nothing changes unless explicitly
-# enabled here.
-ENABLE_FULL_TEXT_EPISODES = False
+# Full-paper feature — merged from branch full-text-feature and enabled after
+# a verified live end-to-end test (PMID 42646910: real PMC full text correctly
+# fetched, chunked, and assembled into a bonus episode with header + silence +
+# body; alert correctly appended to the finding's own abstract; paywalled
+# content correctly reported as unavailable). See git log on this file for
+# the full test history.
+ENABLE_FULL_TEXT_EPISODES = True
 HEADER_SILENCE_SECONDS = 2
 
 # Each Monday's run is one "season" (Season 1 = first week, Season 2 = second, ...).
