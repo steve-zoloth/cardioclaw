@@ -4,6 +4,13 @@ Automated weekly nuclear cardiology audio briefing for Andrew, a blind retired c
 
 **This is a separate project from `~/Documents/voice_pubmed_bot/`.** Don't mix work on the two in one conversation — if a session drifts into the other project, say so and suggest picking it up in its own thread.
 
+## Starting a session for this project
+1. Open the sidebar (left panel listing your chats/sessions).
+2. Either click an existing session already scoped to this project, **or** start a new chat.
+3. If starting new: set the working directory to `~/CardioClaw` before/when the session begins (in a terminal: `cd ~/CardioClaw` before launching; in a GUI client, use its folder picker for a new chat) — this is what makes this file load automatically.
+4. Confirm it loaded — the session should already know about Oracle, the blind-user constraint, etc. without you re-explaining.
+5. Rename the session (sidebar ⋮ menu, or ask Claude to do it) to something clear, e.g. "CardioClaw — <what you're doing>", so it's findable later.
+
 ## Where things live
 - This repo (`~/CardioClaw`) — development workspace, pushed to [github.com/steve-zoloth/cardioclaw](https://github.com/steve-zoloth/cardioclaw), `main` branch is production.
 - Oracle Cloud VM at `157.151.155.75` — where it actually runs. `ssh -i ~/Downloads/ssh-key-2026-04-07-2.key opc@157.151.155.75`. `~/CardioClaw/` there too.
